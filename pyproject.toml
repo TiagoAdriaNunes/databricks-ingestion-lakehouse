@@ -1,0 +1,53 @@
+[project]
+name = "databricks-ingestion-lakehouse"
+version = "0.1.0"
+description = "End-to-end lakehouse pipeline ingesting NYC TLC Trip Record Data into a Bronze/Silver/Gold medallion architecture using PySpark and Delta Lake"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "databricks-sdk>=0.20.0",
+    "databricks-sql-connector>=3.0.0",
+    "delta-spark>=3.2.0",
+    "pandas>=2.2.0",
+    "pyarrow>=15.0.0",
+    "pyspark>=3.5.0",
+    "python-dotenv>=1.2.2",
+    "requests>=2.32.5",
+]
+
+[dependency-groups]
+dev = [
+    "ipykernel>=6.29.0",
+    "jupyter>=1.1.0",
+    "pytest>=9.0.2",
+    "ruff>=0.15.5",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+
+[tool.ruff]
+line-length = 88
+target-version = "py311"
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+skip-magic-trailing-comma = false
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "W",   # pycodestyle warnings
+    "F",   # pyflakes
+    "I",   # isort
+    "UP",  # pyupgrade – modernize syntax (e.g. f-strings, type hints)
+    "B",   # flake8-bugbear – catches real bugs, not style pedantry
+    "C4",  # flake8-comprehensions – cleaner list/dict/set expressions
+    "SIM", # flake8-simplify – simplify boolean checks, redundant code
+]
+ignore = [
+    "E501",   # line too long – ruff format handles this
+    "SIM108", # ternary operator – sometimes less readable
+]

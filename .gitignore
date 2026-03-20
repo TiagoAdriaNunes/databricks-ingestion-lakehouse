@@ -1,0 +1,26 @@
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+
+# Data – never commit raw or processed data
+data/raw/
+data/delta/
+data/checkpoints/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Spark
+derby.log
+metastore_db/
+spark-warehouse/
+
+# Env
+.env
+
+# OS
+.DS_Store

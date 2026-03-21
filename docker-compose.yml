@@ -1,0 +1,14 @@
+services:
+  spark:
+    build: .
+    volumes:
+      - ./data:/app/data
+      - ./src:/app/src
+      - ./notebooks:/app/notebooks
+      - ./scripts:/app/scripts
+    env_file:
+      - .env
+    environment:
+      - PYTHONUNBUFFERED=1
+    # Override the default command per run, e.g.:
+    #   docker compose run spark uv run python notebooks/bronze/01_ingest_tlc_trips.py

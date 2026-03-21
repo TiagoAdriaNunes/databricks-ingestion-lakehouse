@@ -29,8 +29,12 @@ def get_spark(app_name: str = "tlc-lakehouse") -> SparkSession:
             "spark.sql.catalog.spark_catalog",
             "org.apache.spark.sql.delta.catalog.DeltaCatalog",
         )
-        # keep shuffle partitions low for local single-node runs
-        .config("spark.sql.shuffle.partitions", "8")
+        # memory — bump driver heap for local single-node runs
+        .config("spark.driver.memory", "4g")
+        .config("spark.driver.memoryOverhead", "512m")
+        # keep parallelism low to reduce concurrent writer memory pressure
+        .config("spark.sql.shuffle.partitions", "4")
+        .config("spark.default.parallelism", "4")
     )
 
     return configure_spark_with_delta_pip(builder).getOrCreate()

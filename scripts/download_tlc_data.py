@@ -6,16 +6,20 @@ Usage:
     uv run python scripts/download_tlc_data.py --year 2024 --months 1 2 3
 
     # Year range (default: 2019 to current year)
-    uv run python scripts/download_tlc_data.py --all
+    x
     uv run python scripts/download_tlc_data.py --start-year 2019 --end-year 2024
 """
 
 import argparse
+import logging
 import sys
 from datetime import datetime
 from pathlib import Path
 
 import requests
+
+logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
+log = logging.getLogger(__name__)
 
 BASE_URL = "https://d37ci6vzurychx.cloudfront.net/trip-data"
 RAW_DIR = Path(__file__).resolve().parent.parent / "data" / "raw"
@@ -35,21 +39,22 @@ def available_months(year: int) -> list[int]:
     return list(range(1, last_available + 1))
 
 
-def download_month(year: int, month: int, force: bool = False) -> bool:
+def download_month(year: int, month: int, force: bool = False) -> str:
+    """Download one month's file. Returns 'skipped', 'downloaded', or 'failed'."""
     filename = f"yellow_tripdata_{year}-{month:02d}.parquet"
     dest = RAW_DIR / filename
 
     if dest.exists() and not force:
-        print(f"  [skip] {filename} already exists")
-        return True
+        log.info("[skip] %s already exists", filename)
+        return "skipped"
 
     url = f"{BASE_URL}/{filename}"
-    print(f"  [fetch] {url}")
+    log.info("[fetch] %s", url)
     response = requests.get(url, stream=True, timeout=120)
 
     if response.status_code in (403, 404):
-        print(f"  [skip] {filename} — not available yet (HTTP {response.status_code})")
-        return False
+        log.warning("[skip] %s — not available yet (HTTP %s)", filename, response.status_code)
+        return "failed"
 
     response.raise_for_status()
 
@@ -59,8 +64,8 @@ def download_month(year: int, month: int, force: bool = False) -> bool:
             f.write(chunk)
 
     size_mb = dest.stat().st_size / 1_048_576
-    print(f"  [done] {filename} ({size_mb:.1f} MB)")
-    return True
+    log.info("[done] %s (%.1f MB)", filename, size_mb)
+    return "downloaded"
 
 
 def main() -> None:
@@ -87,33 +92,29 @@ def main() -> None:
         years_months = [(args.year, months)]
     else:
         if args.months:
-            print("Warning: --months is ignored without --year")
+            log.warning("--months is ignored without --year")
         years_months = [
             (year, available_months(year))
             for year in range(args.start_year, args.end_year + 1)
         ]
 
     total = sum(len(m) for _, m in years_months)
-    print(f"Downloading up to {total} files across years: {[y for y, _ in years_months]}")
-    print(f"Destination: {RAW_DIR}\n")
+    log.info("Downloading up to %d files across years: %s", total, [y for y, _ in years_months])
+    log.info("Destination: %s", RAW_DIR)
 
     downloaded = skipped = failed = 0
     for year, months in years_months:
-        print(f"--- {year} ---")
+        log.info("--- %d ---", year)
         for month in months:
-            filename = f"yellow_tripdata_{year}-{month:02d}.parquet"
-            dest = RAW_DIR / filename
-            if dest.exists() and not args.force:
-                print(f"  [skip] {filename} already exists")
-                skipped += 1
-                continue
-            ok = download_month(year, month, force=args.force)
-            if ok:
+            status = download_month(year, month, force=args.force)
+            if status == "downloaded":
                 downloaded += 1
+            elif status == "skipped":
+                skipped += 1
             else:
                 failed += 1
 
-    print(f"\nDone. downloaded={downloaded}, skipped={skipped}, failed={failed}")
+    log.info("Done. downloaded=%d, skipped=%d, failed=%d", downloaded, skipped, failed)
 
 
 if __name__ == "__main__":

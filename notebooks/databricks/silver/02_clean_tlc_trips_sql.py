@@ -5,13 +5,17 @@
 # clean Silver Delta table with derived columns.
 #
 # Run after Bronze:
-#   uv run python notebooks/silver/02_clean_tlc_trips_sql.py
+#   uv run python notebooks/databricks/silver/02_clean_tlc_trips_sql.py
 
 # %%
+import logging
 import os
 
 from databricks import sql
 from dotenv import load_dotenv
+
+logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
+log = logging.getLogger(__name__)
 
 load_dotenv()
 
@@ -23,8 +27,15 @@ BRONZE_SCHEMA = os.getenv("DATABRICKS_BRONZE_SCHEMA", "bronze")
 SILVER_SCHEMA = os.getenv("DATABRICKS_SILVER_SCHEMA", "silver")
 
 # Last ingested month — update in .env when new files are uploaded (format: YYYY-MM)
-_last = os.getenv("LAST_INGESTED_MONTH", "2025-11").split("-")
-LAST_INGESTED_YEAR, LAST_INGESTED_MONTH = int(_last[0]), int(_last[1])
+_last_raw = os.getenv("LAST_INGESTED_MONTH", "2025-11")
+try:
+    _last = _last_raw.split("-")
+    LAST_INGESTED_YEAR, LAST_INGESTED_MONTH = int(_last[0]), int(_last[1])
+    assert len(_last) == 2 and 1 <= LAST_INGESTED_MONTH <= 12
+except (ValueError, IndexError, AssertionError):
+    raise ValueError(
+        f"LAST_INGESTED_MONTH='{_last_raw}' is invalid. Expected format: YYYY-MM (e.g. 2025-11)"
+    )
 
 connection = sql.connect(
     server_hostname=HOST,
@@ -32,22 +43,23 @@ connection = sql.connect(
     access_token=TOKEN,
 )
 cursor = connection.cursor()
-print(f"Connected to {HOST}")
+log.info("Connected to %s", HOST)
 
-# %% [markdown]
-# ## Ensure silver schema exists
+try:
+    # %% [markdown]
+    # ## Ensure silver schema exists
 
-# %%
-cursor.execute(f"CREATE SCHEMA IF NOT EXISTS {CATALOG}.{SILVER_SCHEMA}")
-print(f"Schema ready: {CATALOG}.{SILVER_SCHEMA}")
+    # %%
+    cursor.execute(f"CREATE SCHEMA IF NOT EXISTS {CATALOG}.{SILVER_SCHEMA}")
+    log.info("Schema ready: %s.%s", CATALOG, SILVER_SCHEMA)
 
-# %% [markdown]
-# ## Write Silver table
+    # %% [markdown]
+    # ## Write Silver table
 
-# %%
-print(f"Writing {CATALOG}.{SILVER_SCHEMA}.tlc_trips ...")
+    # %%
+    log.info("Writing %s.%s.tlc_trips ...", CATALOG, SILVER_SCHEMA)
 
-cursor.execute(f"""
+    cursor.execute(f"""
 CREATE OR REPLACE TABLE {CATALOG}.{SILVER_SCHEMA}.tlc_trips
 USING DELTA
 PARTITIONED BY (pickup_year, pickup_month)
@@ -113,15 +125,17 @@ WHERE
         OR (YEAR(tpep_pickup_datetime) = {LAST_INGESTED_YEAR} AND MONTH(tpep_pickup_datetime) <= {LAST_INGESTED_MONTH})
     )
 """)
-print("Silver write complete.")
+    log.info("Silver write complete.")
 
-# %% [markdown]
-# ## Quick validation
+    # %% [markdown]
+    # ## Quick validation
 
-# %%
-cursor.execute(f"SELECT COUNT(*) AS row_count FROM {CATALOG}.{SILVER_SCHEMA}.tlc_trips")
-print(f"Silver row count: {cursor.fetchone().row_count:,}")
+    # %%
+    cursor.execute(f"SELECT COUNT(*) AS row_count FROM {CATALOG}.{SILVER_SCHEMA}.tlc_trips")
+    log.info("Silver row count: %s", f"{cursor.fetchone().row_count:,}")
 
-cursor.close()
-connection.close()
-print("Done.")
+finally:
+    cursor.close()
+    connection.close()
+
+log.info("Done.")

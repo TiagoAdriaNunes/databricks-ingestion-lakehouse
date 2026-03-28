@@ -8,12 +8,16 @@ Run after download_tlc_data.py and before 01_ingest_bronze_sql.py:
     uv run python scripts/upload_to_volume.py
 """
 
+import logging
 import os
 import sys
 from pathlib import Path
 
 from databricks.sdk import WorkspaceClient
 from dotenv import load_dotenv
+
+logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
+log = logging.getLogger(__name__)
 
 load_dotenv()
 
@@ -30,7 +34,7 @@ client = WorkspaceClient(host=f"https://{HOST}", token=TOKEN)
 
 parquet_files = sorted(RAW_DIR.glob("*.parquet"))
 if not parquet_files:
-    print(f"No parquet files found in {RAW_DIR}. Run download_tlc_data.py first.")
+    log.error("No parquet files found in %s. Run download_tlc_data.py first.", RAW_DIR)
     sys.exit(1)
 
 # Fetch the set of filenames already present in the Volume
@@ -40,28 +44,28 @@ try:
         for entry in client.files.list_directory_contents(VOLUME_DIR)
         if entry.path
     }
-except Exception:
+except Exception as e:
+    log.warning("Could not list Volume contents, assuming empty: %s", e)
     existing = set()
 
-print(f"Volume already has {len(existing)} file(s).")
+log.info("Volume already has %d file(s).", len(existing))
 
 to_upload = [f for f in parquet_files if f.name not in existing]
 skipped = len(parquet_files) - len(to_upload)
 
 if skipped:
-    print(f"Skipping {skipped} already-uploaded file(s).")
+    log.info("Skipping %d already-uploaded file(s).", skipped)
 
 if not to_upload:
-    print("Nothing to upload.")
+    log.info("Nothing to upload.")
     sys.exit(0)
 
-print(f"Uploading {len(to_upload)} new file(s) to {VOLUME_DIR}/")
+log.info("Uploading %d new file(s) to %s/", len(to_upload), VOLUME_DIR)
 
 for local_path in to_upload:
     volume_path = f"{VOLUME_DIR}/{local_path.name}"
-    print(f"  → {local_path.name}", end=" ", flush=True)
     with local_path.open("rb") as fh:
         client.files.upload(volume_path, fh, overwrite=False)
-    print("done")
+    log.info("  uploaded %s", local_path.name)
 
-print(f"\nUpload complete. {VOLUME_DIR}/ now has {len(existing) + len(to_upload)} file(s).")
+log.info("Upload complete. %s/ now has %d file(s).", VOLUME_DIR, len(existing) + len(to_upload))

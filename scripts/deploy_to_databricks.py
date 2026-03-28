@@ -12,16 +12,20 @@ Usage:
 """
 
 import importlib.util
+import logging
 import sys
 from pathlib import Path
+
+logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
+log = logging.getLogger(__name__)
 
 ROOT = Path(__file__).resolve().parent.parent
 
 
 def run_script(path: Path) -> None:
-    print(f"\n{'=' * 60}")
-    print(f"Running: {path.relative_to(ROOT)}")
-    print("=" * 60)
+    log.info("%s", "=" * 60)
+    log.info("Running: %s", path.relative_to(ROOT))
+    log.info("%s", "=" * 60)
     spec = importlib.util.spec_from_file_location(path.stem, path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -29,12 +33,12 @@ def run_script(path: Path) -> None:
 
 steps = [
     ROOT / "scripts" / "upload_to_volume.py",
-    ROOT / "notebooks" / "bronze" / "01_ingest_bronze_sql.py",
-    ROOT / "notebooks" / "silver" / "02_clean_tlc_trips_sql.py",
-    ROOT / "notebooks" / "gold" / "03_trips_summary_sql.py",
+    ROOT / "notebooks" / "databricks" / "bronze" / "01_ingest_bronze_sql.py",
+    ROOT / "notebooks" / "databricks" / "silver" / "02_clean_tlc_trips_sql.py",
+    ROOT / "notebooks" / "databricks" / "gold" / "03_trips_summary_sql.py",
 ]
 
 for step in steps:
     run_script(step)
 
-print("\nPipeline complete.")
+log.info("Pipeline complete.")

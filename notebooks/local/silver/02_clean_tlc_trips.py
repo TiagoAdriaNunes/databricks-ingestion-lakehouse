@@ -6,12 +6,16 @@
 #
 # Run after Bronze:
 # ```
-# uv run python notebooks/silver/02_clean_tlc_trips.py
+# uv run python notebooks/local/silver/02_clean_tlc_trips.py
 # ```
 
 # %%
+import logging
 import sys
 from pathlib import Path
+
+logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
+log = logging.getLogger(__name__)
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
@@ -27,7 +31,7 @@ spark = get_spark()
 
 # %%
 df_bronze = spark.read.format("delta").load(bronze_table("tlc_trips_raw"))
-print(f"Bronze rows: {df_bronze.count():,}")
+log.info("Bronze rows: %s", f"{df_bronze.count():,}")
 
 # %% [markdown]
 # ## Apply quality filters
@@ -35,21 +39,29 @@ print(f"Bronze rows: {df_bronze.count():,}")
 # %%
 df_clean = (
     df_bronze
-    # drop rows with null pickup/dropoff timestamps
+    # timestamps must be present and logically ordered
     .filter(F.col("tpep_pickup_datetime").isNotNull())
     .filter(F.col("tpep_dropoff_datetime").isNotNull())
-    # drop negative or zero fares
-    .filter(F.col("fare_amount") > 0)
-    # drop zero-distance trips
-    .filter(F.col("trip_distance") > 0)
-    # drop invalid passenger counts
-    .filter(F.col("passenger_count").between(1, 9))
-    # drop trips where dropoff is before pickup
     .filter(F.col("tpep_dropoff_datetime") > F.col("tpep_pickup_datetime"))
+    # cap at 12 hours — covers any realistic NYC trip
+    .filter(
+        (F.unix_timestamp("tpep_dropoff_datetime") - F.unix_timestamp("tpep_pickup_datetime"))
+        / 60 < 720
+    )
+    # distance: allow 0 (GPS rounding on short trips), cap at 200 miles for NYC region
+    .filter(F.col("trip_distance") >= 0)
+    .filter(F.col("trip_distance") < 200)
+    # use total_amount so flat-rate airport trips (fare=0, surcharges>0) are kept
+    .filter(F.col("total_amount") > 0)
+    .filter(F.col("total_amount") < 1000)
+    # NULL is valid post-2022 (TLC stopped requiring this field)
+    .filter(F.col("passenger_count").isNull() | F.col("passenger_count").between(1, 9))
+    # only process data from 2019 onwards
+    .filter(F.year("tpep_pickup_datetime") >= 2019)
 )
 
 removed = df_bronze.count() - df_clean.count()
-print(f"Rows removed by quality filters: {removed:,}")
+log.info("Rows removed by quality filters: %s", f"{removed:,}")
 
 # %% [markdown]
 # ## Add derived columns
@@ -81,7 +93,7 @@ df_silver = df_clean.withColumns(
 
 # %%
 table_path = silver_table("tlc_trips")
-print(f"Writing Silver table → {table_path}")
+log.info("Writing Silver table → %s", table_path)
 
 (
     df_silver.write.format("delta")
@@ -91,14 +103,14 @@ print(f"Writing Silver table → {table_path}")
     .save(table_path)
 )
 
-print("Silver write complete.")
+log.info("Silver write complete.")
 
 # %% [markdown]
 # ## Quick validation
 
 # %%
 df_check = spark.read.format("delta").load(table_path)
-print(f"Silver row count: {df_check.count():,}")
+log.info("Silver row count: %s", f"{df_check.count():,}")
 df_check.select(
     "tpep_pickup_datetime",
     "trip_distance",

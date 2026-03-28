@@ -2,6 +2,8 @@
 
 End-to-end data ingestion pipeline using the [NYC TLC Yellow Taxi Trip Record Data](https://www.nyc.gov/site/tlc/about/tlc-trip-record-data.page) as the source. The pipeline organises data into a **Bronze → Silver → Gold** medallion architecture, with support for both local execution (PySpark + Docker) and Databricks (Unity Catalog + SQL Warehouse).
 
+**[Live pipeline report →](https://tiagoadrianunes.github.io/databricks-ingestion-lakehouse/)**
+
 ## What it does
 
 - Downloads monthly TLC Parquet files from the TLC public CDN
@@ -132,9 +134,32 @@ src/
 data/
   raw/                          # Downloaded Parquet files (gitignored)
   delta/                        # Local Delta tables (gitignored)
+docs/
+  pipeline_overview.qmd         # Quarto report source (queries Gold tables from Databricks)
+  index.html                    # Rendered report — served via GitHub Pages
 Dockerfile                      # python:3.11-slim-bookworm + Java 17 + uv
 docker-compose.yml              # Mounts data/, src/, notebooks/, scripts/
 ```
+
+## Report
+
+A live analytics report is published at **[tiagoadrianunes.github.io/databricks-ingestion-lakehouse](https://tiagoadrianunes.github.io/databricks-ingestion-lakehouse/)**.
+
+It queries the Gold tables from Databricks and renders charts for trip volume, revenue, zone performance, and time patterns.
+
+**Prerequisites:** [Quarto](https://quarto.org/docs/get-started/) installed, `.env` configured, Gold tables populated.
+
+```bash
+# Render the report (outputs to docs/index.html)
+quarto render docs/pipeline_overview.qmd
+
+# Publish — commit and push docs/index.html
+git add docs/index.html
+git commit -m "update report"
+git push
+```
+
+To reflect newly ingested data, update `LAST_INGESTED_MONTH` in `.env`, re-run Silver and Gold, then re-render.
 
 ## Development
 

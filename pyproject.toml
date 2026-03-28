@@ -12,6 +12,7 @@ dependencies = [
     "pyarrow>=15.0.0",
     "pyspark>=3.5.0",
     "python-dotenv>=1.2.2",
+    "matplotlib>=3.9.0",
     "requests>=2.32.5",
 ]
 

@@ -31,9 +31,9 @@ docker compose build
 docker compose run spark uv run python scripts/download_tlc_data.py --year 2020
 
 # 3. Run the full local pipeline
-docker compose run spark uv run python notebooks/bronze/01_ingest_tlc_trips.py
-docker compose run spark uv run python notebooks/silver/02_clean_tlc_trips.py
-docker compose run spark uv run python notebooks/gold/03_trips_summary.py
+docker compose run spark uv run python notebooks/local/bronze/01_ingest_tlc_trips.py
+docker compose run spark uv run python notebooks/local/silver/02_clean_tlc_trips.py
+docker compose run spark uv run python notebooks/local/gold/03_trips_summary.py
 ```
 
 ### Databricks
@@ -60,15 +60,14 @@ scripts/
   upload_to_volume.py           # Upload local files to Databricks Volume (incremental)
   deploy_to_databricks.py       # Run full Databricks pipeline end-to-end
 notebooks/
-  bronze/
-    01_ingest_tlc_trips.py      # Local: raw Parquet → Bronze Delta table
-    01_ingest_bronze_sql.py     # Databricks: Volume → Unity Catalog Bronze table
-  silver/
-    02_clean_tlc_trips.py       # Local: filter, enrich → Silver Delta table
-    02_clean_tlc_trips_sql.py   # Databricks: Bronze → Silver Unity Catalog table
-  gold/
-    03_trips_summary.py         # Local: aggregations → Gold Delta tables
-    03_trips_summary_sql.py     # Databricks: Silver → Gold Unity Catalog tables
+  local/
+    bronze/01_ingest_tlc_trips.py      # Local: raw Parquet → Bronze Delta table
+    silver/02_clean_tlc_trips.py       # Local: filter, enrich → Silver Delta table
+    gold/03_trips_summary.py           # Local: aggregations → Gold Delta tables
+  databricks/
+    bronze/01_ingest_bronze_sql.py     # Databricks: Volume → Unity Catalog Bronze table
+    silver/02_clean_tlc_trips_sql.py   # Databricks: Bronze → Silver Unity Catalog table
+    gold/03_trips_summary_sql.py       # Databricks: Silver → Gold Unity Catalog tables
 src/
   spark_session.py              # SparkSession factory (local + Databricks)
   schema.py                     # Column schema definitions

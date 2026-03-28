@@ -1,0 +1,467 @@
+---
+title: "NYC TLC Yellow Taxi — Lakehouse Pipeline Report"
+author: "Databricks Ingestion Lakehouse"
+date: today
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    code-fold: true
+    theme: cosmo
+    embed-resources: true
+    include-in-header:
+      text: |
+        <style>
+          img { max-width: 100% !important; height: auto !important; }
+        </style>
+execute:
+  echo: false
+  warning: false
+  message: false
+---
+
+```{python}
+#| label: setup
+#| include: false
+import os
+from pathlib import Path
+
+import matplotlib.pyplot as plt
+import matplotlib.ticker as mticker
+import pandas as pd
+from databricks import sql
+from databricks.sdk import WorkspaceClient
+from dotenv import load_dotenv
+
+load_dotenv(Path.cwd().parent / ".env" if (Path.cwd().parent / ".env").exists() else Path.cwd() / ".env")
+
+HOST      = os.environ["DATABRICKS_HOST"]
+HTTP_PATH = os.environ["DATABRICKS_HTTP_PATH"]
+TOKEN     = os.environ["DATABRICKS_TOKEN"]
+CATALOG   = os.getenv("DATABRICKS_CATALOG", "workspace")
+BRONZE_SCHEMA = os.getenv("DATABRICKS_BRONZE_SCHEMA", "bronze")
+SILVER_SCHEMA = os.getenv("DATABRICKS_SILVER_SCHEMA", "silver")
+GOLD_SCHEMA   = os.getenv("DATABRICKS_GOLD_SCHEMA",   "gold")
+VOLUME        = os.getenv("DATABRICKS_VOLUME", "raw_files")
+
+conn   = sql.connect(server_hostname=HOST, http_path=HTTP_PATH, access_token=TOKEN)
+cursor = conn.cursor()
+sdk    = WorkspaceClient(host=f"https://{HOST}", token=TOKEN)
+
+def query(sql_str: str) -> pd.DataFrame:
+    cursor.execute(sql_str)
+    rows = cursor.fetchall()
+    cols = [d[0] for d in cursor.description]
+    return pd.DataFrame(rows, columns=cols)
+
+VOLUME_PATH = f"/Volumes/{CATALOG}/{BRONZE_SCHEMA}/{VOLUME}"
+DAY_NAMES = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]
+
+# Last ingested month — update in .env when new files are uploaded (format: YYYY-MM)
+LAST_INGESTED_MONTH = os.getenv("LAST_INGESTED_MONTH", "2025-11")
+
+plt.rcParams.update({
+    "figure.dpi": 120,
+    "axes.spines.top": False,
+    "axes.spines.right": False,
+    "axes.grid": True,
+    "grid.alpha": 0.3,
+})
+```
+
+## Pipeline Overview
+
+This report summarises the **NYC TLC Yellow Taxi** medallion pipeline loaded into
+Databricks Unity Catalog.
+
+```{mermaid}
+%%| fig-cap: "Medallion architecture"
+flowchart LR
+    V[("83 Parquet files<br/>/Volumes/…/raw_files")]
+    B["303 M rows<br/>Bronze<br/>tlc_trips_raw"]
+    S["~250 M rows<br/>Silver<br/>tlc_trips"]
+    G1["Gold<br/>trips_by_month"]
+    G2["Gold<br/>trips_by_zone"]
+    G3["Gold<br/>time_patterns"]
+
+    V --> B --> S --> G1 & G2 & G3
+```
+
+---
+
+## 1 · Ingested Files
+
+::: {.callout-note collapse="true"}
+## Parquet files in the Unity Catalog Volume
+
+```{python}
+#| label: tbl-files
+entries = list(sdk.files.list_directory_contents(VOLUME_PATH))
+files = pd.DataFrame([
+    {"File": Path(e.path).name, "Size (MB)": round(e.file_size / 1_048_576, 1)}
+    for e in entries if e.path and not e.is_directory
+]).sort_values("File").reset_index(drop=True)
+files.style.format({"Size (MB)": "{:.1f}"}).hide(axis="index")
+```
+
+:::
+
+```{python}
+#| label: file-summary
+total_gb = files["Size (MB)"].sum() / 1024
+print(f"{len(files)} files · {total_gb:.1f} GB stored in {VOLUME_PATH}")
+```
+
+---
+
+## 2 · Table Row Counts
+
+```{python}
+#| label: tbl-row-counts
+#| tbl-cap: "Row counts across all medallion layers"
+bronze_rows = query(f"SELECT COUNT(*) AS n FROM {CATALOG}.{BRONZE_SCHEMA}.tlc_trips_raw").iloc[0,0]
+silver_rows = query(f"SELECT COUNT(*) AS n FROM {CATALOG}.{SILVER_SCHEMA}.tlc_trips").iloc[0,0]
+gold_month_rows = query(f"SELECT COUNT(*) AS n FROM {CATALOG}.{GOLD_SCHEMA}.trips_by_month").iloc[0,0]
+gold_zone_rows  = query(f"SELECT COUNT(*) AS n FROM {CATALOG}.{GOLD_SCHEMA}.trips_by_zone").iloc[0,0]
+gold_time_rows  = query(f"SELECT COUNT(*) AS n FROM {CATALOG}.{GOLD_SCHEMA}.time_patterns").iloc[0,0]
+retention_pct   = float(round(silver_rows / bronze_rows * 100, 1))
+
+counts = {
+    "Layer": ["Bronze", "Silver", "Gold — trips_by_month", "Gold — trips_by_zone", "Gold — time_patterns"],
+    "Table": [
+        f"{CATALOG}.{BRONZE_SCHEMA}.tlc_trips_raw",
+        f"{CATALOG}.{SILVER_SCHEMA}.tlc_trips",
+        f"{CATALOG}.{GOLD_SCHEMA}.trips_by_month",
+        f"{CATALOG}.{GOLD_SCHEMA}.trips_by_zone",
+        f"{CATALOG}.{GOLD_SCHEMA}.time_patterns",
+    ],
+    "Rows": [bronze_rows, silver_rows, gold_month_rows, gold_zone_rows, gold_time_rows],
+}
+df_counts = pd.DataFrame(counts)
+df_counts["Rows"] = df_counts["Rows"].apply(lambda x: f"{x:,}")
+df_counts.style.hide(axis="index")
+```
+
+::: {.callout-note}
+Silver retains **`{python} retention_pct` %** of Bronze rows after cleaning (removing nulls,
+outliers, invalid dates, zero-distance trips, and dates outside 2019–present).
+:::
+
+---
+
+## 3 · Monthly Trip Volume
+
+```{python}
+#| label: fig-monthly-volume
+#| fig-cap: "Monthly trip count (Silver) — 2019 to present"
+#| fig-alt: "Bar chart of monthly trip counts from 2019 onwards"
+df_month = query(f"""
+    SELECT pickup_year, pickup_month, trip_count, total_revenue, avg_fare,
+           avg_distance_miles, avg_duration_min
+    FROM   {CATALOG}.{GOLD_SCHEMA}.trips_by_month
+    WHERE  pickup_year >= 2019
+      AND  DATE_FORMAT(MAKE_DATE(pickup_year, pickup_month, 1), 'yyyy-MM') <= '{LAST_INGESTED_MONTH}'
+    ORDER  BY pickup_year, pickup_month
+""")
+df_month["period"] = pd.to_datetime(
+    df_month["pickup_year"].astype(str) + "-" + df_month["pickup_month"].astype(str).str.zfill(2)
+)
+
+labels = df_month["period"].dt.strftime("%Y-%m")
+x = range(len(labels))
+
+fig, ax = plt.subplots(figsize=(14, 4))
+ax.bar(x, df_month["trip_count"] / 1_000_000, color="#1f77b4", alpha=0.85)
+ax.set_xticks([i for i, l in enumerate(labels) if l.endswith("-01") or l.endswith("-07")])
+ax.set_xticklabels([l for l in labels if l.endswith("-01") or l.endswith("-07")], rotation=45, ha="right")
+ax.set_xlabel("Month")
+ax.set_ylabel("Trips (millions)")
+ax.set_title("Monthly Trip Volume")
+ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda x, _: f"{x:.1f}M"))
+fig.tight_layout()
+plt.show()
+```
+
+---
+
+## 4 · Monthly Revenue
+
+```{python}
+#| label: fig-monthly-revenue
+#| fig-cap: "Total monthly revenue (USD) — 2019 to present"
+#| fig-alt: "Line chart of monthly revenue"
+rev_labels = df_month["period"].dt.strftime("%Y-%m")
+rev_x = range(len(rev_labels))
+
+fig, ax = plt.subplots(figsize=(14, 4))
+ax.plot(rev_x, df_month["total_revenue"] / 1_000_000, color="#d62728", linewidth=2)
+ax.fill_between(rev_x, df_month["total_revenue"] / 1_000_000, alpha=0.15, color="#d62728")
+ax.set_xticks([i for i, l in enumerate(rev_labels) if l.endswith("-01") or l.endswith("-07")])
+ax.set_xticklabels([l for l in rev_labels if l.endswith("-01") or l.endswith("-07")], rotation=45, ha="right")
+ax.set_xlabel("Month")
+ax.set_ylabel("Revenue (USD millions)")
+ax.set_title("Monthly Revenue")
+ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda x, _: f"${x:.0f}M"))
+fig.tight_layout()
+plt.show()
+```
+
+---
+
+## 5 · Top 15 Pickup Zones
+
+```{python}
+#| label: fig-top-zones
+#| fig-cap: "Top 15 pickup zones by number of trips"
+#| fig-alt: "Horizontal bar chart of top pickup zones"
+df_zone = query(f"""
+    SELECT zone_id, pickups, avg_fare
+    FROM   {CATALOG}.{GOLD_SCHEMA}.trips_by_zone
+    ORDER  BY pickups DESC
+    LIMIT  15
+""")
+df_zone = df_zone.sort_values("pickups")
+
+fig, ax = plt.subplots(figsize=(9, 5))
+ax.barh(df_zone["zone_id"].astype(str), df_zone["pickups"] / 1_000_000, color="#2ca02c", alpha=0.85)
+ax.set_xlabel("Pickups (millions)")
+ax.set_title("Top 15 Pickup Zones (by Zone ID)")
+ax.xaxis.set_major_formatter(mticker.FuncFormatter(lambda x, _: f"{x:.1f}M"))
+fig.tight_layout()
+plt.show()
+```
+
+---
+
+## 6 · Hourly Demand Heatmap
+
+```{python}
+#| label: fig-heatmap
+#| fig-cap: "Trip demand heatmap — hour of day × day of week"
+#| fig-alt: "Heatmap showing trip counts by hour and day of week"
+df_time = query(f"""
+    SELECT pickup_hour, pickup_day_of_week, trip_count, avg_duration_min, avg_fare
+    FROM   {CATALOG}.{GOLD_SCHEMA}.time_patterns
+    ORDER  BY pickup_day_of_week, pickup_hour
+""")
+
+pivot = df_time.pivot(index="pickup_hour", columns="pickup_day_of_week", values="trip_count")
+day_labels = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]
+
+fig, ax = plt.subplots(figsize=(10, 7))
+im = ax.imshow(pivot.values / 1_000_000, aspect="auto", cmap="YlOrRd")
+ax.set_xticks(range(7))
+ax.set_xticklabels(day_labels)
+ax.set_yticks(range(24))
+ax.set_yticklabels([f"{h:02d}:00" for h in range(24)])
+ax.set_title("Trip Demand by Hour & Day of Week")
+cbar = fig.colorbar(im, ax=ax)
+cbar.set_label("Trips (millions)")
+fig.tight_layout()
+plt.show()
+```
+
+---
+
+## 7 · Average Fare Inflation Over Time
+
+```{python}
+#| label: fig-fare-trend
+#| fig-cap: "Average fare per trip by year — showing post-COVID price inflation"
+#| fig-alt: "Bar chart of average fare per year"
+df_avg_fare = df_month.groupby("pickup_year")["avg_fare"].mean().reset_index()
+df_avg_fare = df_avg_fare.rename(columns={"pickup_year": "year"})
+
+fig, ax = plt.subplots(figsize=(10, 4))
+bars = ax.bar(df_avg_fare["year"].astype(str), df_avg_fare["avg_fare"], color="#9467bd", alpha=0.85)
+ax.bar_label(bars, fmt="$%.2f", padding=4, fontsize=9)
+ax.set_xlabel("Year")
+ax.set_ylabel("Avg Fare (USD)")
+ax.set_title("Average Fare Per Trip by Year")
+ax.set_ylim(0, df_avg_fare["avg_fare"].max() * 1.2)
+fig.tight_layout()
+plt.show()
+```
+
+---
+
+## 8 · Weekend vs Weekday Demand
+
+```{python}
+#| label: fig-weekend-weekday
+#| fig-cap: "Total trips by hour — weekday vs weekend"
+#| fig-alt: "Line chart comparing weekday and weekend hourly trip volumes"
+df_time_wk = df_time.copy()
+df_time_wk["is_weekend"] = df_time_wk["pickup_day_of_week"].isin([1, 7])  # Sun=1, Sat=7
+
+df_wk = df_time_wk.groupby(["pickup_hour", "is_weekend"])["trip_count"].sum().reset_index()
+weekday = df_wk[~df_wk["is_weekend"]].sort_values("pickup_hour")
+weekend = df_wk[df_wk["is_weekend"]].sort_values("pickup_hour")
+
+fig, ax = plt.subplots(figsize=(11, 4))
+ax.plot(weekday["pickup_hour"], weekday["trip_count"] / 1_000_000, label="Weekday", color="#1f77b4", linewidth=2, marker="o", markersize=4)
+ax.plot(weekend["pickup_hour"], weekend["trip_count"] / 1_000_000, label="Weekend", color="#ff7f0e", linewidth=2, marker="o", markersize=4)
+ax.set_xticks(range(24))
+ax.set_xticklabels([f"{h:02d}:00" for h in range(24)], rotation=45, ha="right")
+ax.set_xlabel("Hour of Day")
+ax.set_ylabel("Trips (millions)")
+ax.set_title("Weekday vs Weekend Hourly Demand")
+ax.legend()
+fig.tight_layout()
+plt.show()
+```
+
+---
+
+## 9 · Zone Revenue Concentration (Pareto)
+
+```{python}
+#| label: fig-pareto
+#| fig-cap: "Cumulative revenue share by pickup zone — top zones dominate"
+#| fig-alt: "Pareto curve of zone revenue concentration"
+df_zone_all = query(f"""
+    SELECT zone_id, total_revenue
+    FROM   {CATALOG}.{GOLD_SCHEMA}.trips_by_zone
+    ORDER  BY total_revenue DESC
+""")
+df_zone_all["cum_pct"] = df_zone_all["total_revenue"].cumsum() / df_zone_all["total_revenue"].sum() * 100
+df_zone_all["zone_pct"] = (df_zone_all.index + 1) / len(df_zone_all) * 100
+
+p80_zones = df_zone_all[df_zone_all["cum_pct"] <= 80].shape[0]
+pct_zones_for_80 = round(p80_zones / len(df_zone_all) * 100, 1)
+
+fig, ax = plt.subplots(figsize=(10, 4))
+ax.plot(df_zone_all["zone_pct"], df_zone_all["cum_pct"], color="#2ca02c", linewidth=2)
+ax.axhline(80, color="red", linestyle="--", linewidth=1, alpha=0.7, label="80% revenue")
+ax.axvline(pct_zones_for_80, color="red", linestyle="--", linewidth=1, alpha=0.7)
+ax.set_xlabel("% of Zones")
+ax.set_ylabel("Cumulative Revenue %")
+ax.set_title(f"Zone Revenue Concentration — top {pct_zones_for_80}% of zones = 80% of revenue")
+ax.legend()
+fig.tight_layout()
+plt.show()
+```
+
+---
+
+## 10 · Trip Distance & Duration Trends
+
+```{python}
+#| label: fig-distance-duration
+#| fig-cap: "Average trip distance and duration by year"
+#| fig-alt: "Dual-axis chart of avg distance and duration over years"
+df_dd = df_month.groupby("pickup_year").agg(
+    avg_distance=("avg_distance_miles", "mean"),
+    avg_duration=("avg_duration_min", "mean"),
+).reset_index().rename(columns={"pickup_year": "year"})
+
+fig, ax1 = plt.subplots(figsize=(10, 4))
+ax2 = ax1.twinx()
+
+ax1.bar(df_dd["year"].astype(str), df_dd["avg_distance"], color="#1f77b4", alpha=0.6, label="Avg Distance (miles)")
+ax2.plot(df_dd["year"].astype(str), df_dd["avg_duration"], color="#d62728", linewidth=2, marker="o", markersize=5, label="Avg Duration (min)")
+
+ax1.set_xlabel("Year")
+ax1.set_ylabel("Avg Distance (miles)", color="#1f77b4")
+ax2.set_ylabel("Avg Duration (min)", color="#d62728")
+ax1.set_title("Average Trip Distance & Duration by Year")
+
+lines1, labels1 = ax1.get_legend_handles_labels()
+lines2, labels2 = ax2.get_legend_handles_labels()
+ax1.legend(lines1 + lines2, labels1 + labels2, loc="upper left")
+fig.tight_layout()
+plt.show()
+```
+
+---
+
+## 11 · Key Insights
+
+```{python}
+#| label: insights
+peak      = df_month.loc[df_month["trip_count"].idxmax()]
+trough    = df_month.loc[df_month["trip_count"].idxmin()]
+best_rev  = df_month.loc[df_month["total_revenue"].idxmax()]
+avg_fare_overall = (df_month["avg_fare"] * df_month["trip_count"]).sum() / df_month["trip_count"].sum()
+
+peak_label     = peak["period"].strftime("%B %Y")
+trough_label   = trough["period"].strftime("%B %Y")
+best_rev_label = best_rev["period"].strftime("%B %Y")
+
+busiest_hour  = df_time.loc[df_time["trip_count"].idxmax()]
+quietest_hour = df_time.loc[df_time["trip_count"].idxmin()]
+
+# Fare inflation: first vs latest year
+fare_first  = df_avg_fare.iloc[0]
+fare_latest = df_avg_fare.iloc[-1]
+fare_change_pct = round((fare_latest["avg_fare"] - fare_first["avg_fare"]) / fare_first["avg_fare"] * 100, 1)
+
+# COVID recovery: first month back to ≥80% of pre-COVID peak, searched after the trough
+pre_covid_peak = df_month[df_month["pickup_year"] < 2020]["trip_count"].max()
+recovery_threshold = pre_covid_peak * 0.8
+trough_idx = df_month["trip_count"].idxmin()
+post_trough = df_month.iloc[trough_idx + 1:]
+candidates = post_trough[post_trough["trip_count"] >= recovery_threshold]
+recovery_label = candidates.iloc[0]["period"].strftime("%B %Y") if not candidates.empty else "Not yet recovered"
+
+# Weekend vs weekday: peak hour difference
+weekday_peak = weekday.loc[weekday["trip_count"].idxmax()]
+weekend_peak = weekend.loc[weekend["trip_count"].idxmax()]
+
+# Distance trend: most vs least recent year
+dist_first  = df_dd.iloc[0]
+dist_latest = df_dd.iloc[-1]
+dist_change = round(dist_latest["avg_distance"] - dist_first["avg_distance"], 2)
+dist_trend  = f"+{dist_change} mi" if dist_change >= 0 else f"{dist_change} mi"
+
+insights = pd.DataFrame({
+    "Category": [
+        "Volume", "Volume", "Volume",
+        "Revenue", "Revenue",
+        "Demand patterns", "Demand patterns", "Demand patterns",
+        "Trip characteristics", "Trip characteristics",
+    ],
+    "Metric": [
+        "Peak month",
+        "COVID trough",
+        "80% recovery after COVID",
+        "Best revenue month",
+        "Average fare (2019–now)",
+        "Busiest hour (weekday)",
+        "Busiest hour (weekend)",
+        "Quietest hour",
+        "Avg fare increase since 2019",
+        f"Avg trip distance change ({int(dist_first['year'])}→{int(dist_latest['year'])})",
+    ],
+    "Value": [
+        f"{peak_label} — {peak['trip_count']:,.0f} trips",
+        f"{trough_label} — {trough['trip_count']:,.0f} trips (−{round((1 - trough['trip_count']/pre_covid_peak)*100)}% vs pre-COVID peak)",
+        f"{recovery_label} (≥80% of pre-COVID peak)",
+        f"{best_rev_label} — ${best_rev['total_revenue']:,.0f}",
+        f"${avg_fare_overall:.2f}",
+        f"{int(weekday_peak['pickup_hour']):02d}:00",
+        f"{int(weekend_peak['pickup_hour']):02d}:00",
+        f"{int(quietest_hour['pickup_hour']):02d}:00 on {DAY_NAMES[int(quietest_hour['pickup_day_of_week'])]}",
+        f"${fare_first['avg_fare']:.2f} → ${fare_latest['avg_fare']:.2f} (+{fare_change_pct}%)",
+        dist_trend,
+    ],
+})
+insights.style.hide(axis="index")
+```
+
+::: {.callout-important}
+## COVID-19 Impact
+April 2020 saw a **~90% collapse** in NYC taxi ridership. The fleet did not recover
+to 80% of pre-COVID trip volume until **`{python} recovery_label`**.
+:::
+
+---
+
+```{python}
+#| label: teardown
+#| include: false
+cursor.close()
+conn.close()
+```
+
+*Generated with [Quarto](https://quarto.org) · Data source: NYC TLC Trip Record Data via Databricks Unity Catalog*

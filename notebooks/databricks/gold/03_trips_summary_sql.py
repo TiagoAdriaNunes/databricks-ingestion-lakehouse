@@ -7,13 +7,17 @@
 # - time_patterns     — hourly and day-of-week mobility patterns
 #
 # Run after Silver:
-#   uv run python notebooks/gold/03_trips_summary_sql.py
+#   uv run python notebooks/databricks/gold/03_trips_summary_sql.py
 
 # %%
+import logging
 import os
 
 from databricks import sql
 from dotenv import load_dotenv
+
+logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
+log = logging.getLogger(__name__)
 
 load_dotenv()
 
@@ -30,25 +34,26 @@ connection = sql.connect(
     access_token=TOKEN,
 )
 cursor = connection.cursor()
-print(f"Connected to {HOST}")
-
-# %% [markdown]
-# ## Ensure gold schema exists
-
-# %%
-cursor.execute(f"CREATE SCHEMA IF NOT EXISTS {CATALOG}.{GOLD_SCHEMA}")
-print(f"Schema ready: {CATALOG}.{GOLD_SCHEMA}")
+log.info("Connected to %s", HOST)
 
 SILVER = f"{CATALOG}.{SILVER_SCHEMA}.tlc_trips"
 completed = []
 
-# %% [markdown]
-# ## Gold 1 — Monthly trip volume and revenue
-
-# %%
 try:
-    print(f"Writing {CATALOG}.{GOLD_SCHEMA}.trips_by_month ...")
-    cursor.execute(f"""
+    # %% [markdown]
+    # ## Ensure gold schema exists
+
+    # %%
+    cursor.execute(f"CREATE SCHEMA IF NOT EXISTS {CATALOG}.{GOLD_SCHEMA}")
+    log.info("Schema ready: %s.%s", CATALOG, GOLD_SCHEMA)
+
+    # %% [markdown]
+    # ## Gold 1 — Monthly trip volume and revenue
+
+    # %%
+    try:
+        log.info("Writing %s.%s.trips_by_month ...", CATALOG, GOLD_SCHEMA)
+        cursor.execute(f"""
 CREATE OR REPLACE TABLE {CATALOG}.{GOLD_SCHEMA}.trips_by_month
 USING DELTA AS
 SELECT
@@ -63,19 +68,19 @@ SELECT
 FROM {SILVER}
 GROUP BY pickup_year, pickup_month
 """)
-    cursor.execute(f"SELECT COUNT(*) AS n FROM {CATALOG}.{GOLD_SCHEMA}.trips_by_month")
-    print(f"  rows: {cursor.fetchone().n}")
-    completed.append("trips_by_month")
-finally:
-    pass  # errors propagate; connection closed in final block below
+        cursor.execute(f"SELECT COUNT(*) AS n FROM {CATALOG}.{GOLD_SCHEMA}.trips_by_month")
+        log.info("  rows: %d", cursor.fetchone().n)
+        completed.append("trips_by_month")
+    except Exception as e:
+        log.error("  ERROR trips_by_month: %s", e)
 
-# %% [markdown]
-# ## Gold 2 — Pickup zone performance
+    # %% [markdown]
+    # ## Gold 2 — Pickup zone performance
 
-# %%
-try:
-    print(f"Writing {CATALOG}.{GOLD_SCHEMA}.trips_by_zone ...")
-    cursor.execute(f"""
+    # %%
+    try:
+        log.info("Writing %s.%s.trips_by_zone ...", CATALOG, GOLD_SCHEMA)
+        cursor.execute(f"""
 CREATE OR REPLACE TABLE {CATALOG}.{GOLD_SCHEMA}.trips_by_zone
 USING DELTA AS
 SELECT
@@ -88,19 +93,19 @@ FROM {SILVER}
 WHERE PULocationID IS NOT NULL
 GROUP BY PULocationID
 """)
-    cursor.execute(f"SELECT COUNT(*) AS n FROM {CATALOG}.{GOLD_SCHEMA}.trips_by_zone")
-    print(f"  rows: {cursor.fetchone().n}")
-    completed.append("trips_by_zone")
-finally:
-    pass
+        cursor.execute(f"SELECT COUNT(*) AS n FROM {CATALOG}.{GOLD_SCHEMA}.trips_by_zone")
+        log.info("  rows: %d", cursor.fetchone().n)
+        completed.append("trips_by_zone")
+    except Exception as e:
+        log.error("  ERROR trips_by_zone: %s", e)
 
-# %% [markdown]
-# ## Gold 3 — Time patterns (hour × day of week)
+    # %% [markdown]
+    # ## Gold 3 — Time patterns (hour × day of week)
 
-# %%
-try:
-    print(f"Writing {CATALOG}.{GOLD_SCHEMA}.time_patterns ...")
-    cursor.execute(f"""
+    # %%
+    try:
+        log.info("Writing %s.%s.time_patterns ...", CATALOG, GOLD_SCHEMA)
+        cursor.execute(f"""
 CREATE OR REPLACE TABLE {CATALOG}.{GOLD_SCHEMA}.time_patterns
 USING DELTA AS
 SELECT
@@ -112,9 +117,12 @@ SELECT
 FROM {SILVER}
 GROUP BY pickup_hour, pickup_day_of_week
 """)
-    cursor.execute(f"SELECT COUNT(*) AS n FROM {CATALOG}.{GOLD_SCHEMA}.time_patterns")
-    print(f"  rows: {cursor.fetchone().n}")
-    completed.append("time_patterns")
+        cursor.execute(f"SELECT COUNT(*) AS n FROM {CATALOG}.{GOLD_SCHEMA}.time_patterns")
+        log.info("  rows: %d", cursor.fetchone().n)
+        completed.append("time_patterns")
+    except Exception as e:
+        log.error("  ERROR time_patterns: %s", e)
+
 finally:
     cursor.close()
     connection.close()
@@ -122,6 +130,6 @@ finally:
 all_tables = ["trips_by_month", "trips_by_zone", "time_patterns"]
 missing = [t for t in all_tables if t not in completed]
 if missing:
-    print(f"\nWARNING: incomplete run — failed tables: {missing}")
+    log.warning("Incomplete run — failed tables: %s", missing)
 else:
-    print("\nGold tables complete.")
+    log.info("Gold tables complete.")

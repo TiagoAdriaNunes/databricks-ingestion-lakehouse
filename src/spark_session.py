@@ -1,6 +1,10 @@
 """SparkSession factory — works locally and on Databricks."""
 
+import logging
+
 from pyspark.sql import SparkSession
+
+log = logging.getLogger(__name__)
 
 
 def get_spark(app_name: str = "tlc-lakehouse") -> SparkSession:
@@ -15,8 +19,8 @@ def get_spark(app_name: str = "tlc-lakehouse") -> SparkSession:
         session = SparkSession.getActiveSession()
         if session is not None:
             return session
-    except Exception:
-        pass
+    except Exception as e:
+        log.warning("getActiveSession() failed, falling back to local builder: %s", e)
 
     # local: configure_spark_with_delta_pip adds the JARs to the classpath;
     # the extension + catalog configs must also be set on the builder.

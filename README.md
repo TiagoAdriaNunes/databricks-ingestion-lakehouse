@@ -15,42 +15,99 @@ End-to-end data ingestion pipeline using the [NYC TLC Yellow Taxi Trip Record Da
 - **Databricks** — SQL Warehouse + Unity Catalog + Delta Lake
 - **PySpark + Delta Lake** — local execution via Docker
 - **Python** — scripts for download, upload, and ingestion
-- **Docker** — containerised local runs (no Java/Python setup needed)
+- **Docker** — containerised local runs (bundles Java 17 + uv so you don't need either installed)
 - **uv** — package management
 - **ruff** — linting and formatting
+
+## Prerequisites
+
+| Requirement | Local path | Databricks path |
+|---|---|---|
+| [Docker](https://docs.docker.com/get-docker/) | Required (replaces Java + Python setup) | Optional (only for download step) |
+| Python 3.11+ + [uv](https://docs.astral.sh/uv/) | Via Docker | Required |
+| Databricks workspace | — | Required |
+| SQL Warehouse | — | Required |
+| Unity Catalog enabled | — | Required |
 
 ## Quick start
 
 ### Local (Docker)
 
+Docker is required for local runs because PySpark needs Java 17. The image bundles everything.
+
 ```bash
 # 1. Build the image
 docker compose build
 
-# 2. Download TLC data
-docker compose run spark uv run python scripts/download_tlc_data.py --year 2020
+# 2. Download TLC data (writes to data/raw/ on your machine)
+docker compose run spark uv run python scripts/download_tlc_data.py --all                        # 2019 to now
+docker compose run spark uv run python scripts/download_tlc_data.py --year 2024                  # single year
+docker compose run spark uv run python scripts/download_tlc_data.py --year 2024 --months 1 2 3  # specific months
 
-# 3. Run the full local pipeline
+# 3. Run the full local pipeline (Bronze → Silver → Gold)
 docker compose run spark uv run python notebooks/local/bronze/01_ingest_tlc_trips.py
 docker compose run spark uv run python notebooks/local/silver/02_clean_tlc_trips.py
 docker compose run spark uv run python notebooks/local/gold/03_trips_summary.py
 ```
 
+Delta tables are written to `data/delta/` on your local machine.
+
 ### Databricks
 
+The Databricks scripts connect via the SQL connector and SDK — no Docker or Java needed.
+
 ```bash
-# 1. Configure credentials
+# 1. Install dependencies
+uv sync
+source .venv/bin/activate
+
+# 2. Configure credentials
 cp .env.example .env
-# edit .env with your Databricks host, token, SQL warehouse path, catalog, and schemas
+# Edit .env — see Environment variables below
 
-# 2. Download TLC data
-docker compose run spark uv run python scripts/download_tlc_data.py --year 2020
+# 3. Download TLC data locally
+uv run python scripts/download_tlc_data.py --all                              # 2019 to now
+uv run python scripts/download_tlc_data.py --year 2024                       # single year
+uv run python scripts/download_tlc_data.py --year 2024 --months 1 2 3       # specific months
 
-# 3. Upload to Databricks Volume + run full pipeline
-docker compose run spark uv run python scripts/deploy_to_databricks.py
+# 4. Run the full Databricks pipeline (upload + Bronze + Silver + Gold)
+uv run python scripts/deploy_to_databricks.py
 ```
 
 `deploy_to_databricks.py` uploads only new files (skips already-uploaded ones), then runs Bronze → Silver → Gold against Unity Catalog.
+
+#### Running steps individually
+
+```bash
+# Upload local Parquet files to the Unity Catalog Volume
+uv run python scripts/upload_to_volume.py
+
+# Bronze: Volume → Unity Catalog Delta table
+uv run python notebooks/databricks/bronze/01_ingest_bronze_sql.py
+
+# Silver: Bronze → cleaned and enriched Silver table
+uv run python notebooks/databricks/silver/02_clean_tlc_trips_sql.py
+
+# Gold: Silver → three analytics aggregation tables
+uv run python notebooks/databricks/gold/03_trips_summary_sql.py
+```
+
+## Environment variables
+
+Copy `.env.example` to `.env` and fill in your values:
+
+| Variable | Description | Example |
+|---|---|---|
+| `DATABRICKS_HOST` | Workspace hostname (no `https://`) | `dbc-abc123.cloud.databricks.com` |
+| `DATABRICKS_TOKEN` | Personal access token | `dapie...` |
+| `DATABRICKS_HTTP_PATH` | SQL Warehouse HTTP path | `/sql/1.0/warehouses/abc123` |
+| `DATABRICKS_CATALOG` | Unity Catalog name | `workspace` |
+| `DATABRICKS_SCHEMA` | Schema for Bronze layer and Volume | `bronze` |
+| `DATABRICKS_BRONZE_SCHEMA` | Bronze schema (read by Silver) | `bronze` |
+| `DATABRICKS_SILVER_SCHEMA` | Silver schema | `silver` |
+| `DATABRICKS_GOLD_SCHEMA` | Gold schema | `gold` |
+| `DATABRICKS_VOLUME` | Volume name inside Bronze schema | `raw_files` |
+| `LAST_INGESTED_MONTH` | Latest month loaded into the Volume (`YYYY-MM`) — Silver uses this as an upper-date filter | `2025-11` |
 
 ## Project structure
 
@@ -79,6 +136,17 @@ Dockerfile                      # python:3.11-slim-bookworm + Java 17 + uv
 docker-compose.yml              # Mounts data/, src/, notebooks/, scripts/
 ```
 
+## Development
+
+```bash
+uv sync
+source .venv/bin/activate
+
+uv run ruff check .    # lint
+uv run ruff format .   # format
+uv run pytest          # tests
+```
+
 ## Data source
 
-NYC TLC Trip Record Data is published monthly with a short delay. Files are available in Parquet format at the TLC public CDN and cover yellow taxi trips dating back to 2009.
+NYC TLC Trip Record Data is published monthly with a ~2 month lag. Files are available in Parquet format at the TLC public CDN and cover yellow taxi trips dating back to 2009.

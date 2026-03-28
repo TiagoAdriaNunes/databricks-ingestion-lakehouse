@@ -8,12 +8,16 @@
 #
 # Run after Silver:
 # ```
-# uv run python notebooks/gold/03_trips_summary.py
+# uv run python notebooks/local/gold/03_trips_summary.py
 # ```
 
 # %%
+import logging
 import sys
 from pathlib import Path
+
+logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
+log = logging.getLogger(__name__)
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
@@ -26,7 +30,7 @@ spark = get_spark()
 
 # %%
 df_silver = spark.read.format("delta").load(silver_table("tlc_trips"))
-print(f"Silver rows: {df_silver.count():,}")
+log.info("Silver rows: %s", f"{df_silver.count():,}")
 
 # %% [markdown]
 # ## Gold 1 — Monthly trip volume and revenue
@@ -42,12 +46,11 @@ df_by_month = (
         F.round(F.avg("trip_duration_min"), 1).alias("avg_duration_min"),
         F.round(F.avg("passenger_count"), 2).alias("avg_passengers"),
     )
-    .orderBy("pickup_year", "pickup_month")
 )
 
 path = gold_table("trips_by_month")
 df_by_month.write.format("delta").mode("overwrite").save(path)
-print(f"trips_by_month written → {path}")
+log.info("trips_by_month written → %s", path)
 df_by_month.show()
 
 # %% [markdown]
@@ -63,12 +66,11 @@ df_by_zone = (
         F.round(F.avg("trip_distance"), 2).alias("avg_distance_miles"),
     )
     .withColumnRenamed("PULocationID", "zone_id")
-    .orderBy(F.desc("pickups"))
 )
 
 path = gold_table("trips_by_zone")
 df_by_zone.write.format("delta").mode("overwrite").save(path)
-print(f"trips_by_zone written → {path}")
+log.info("trips_by_zone written → %s", path)
 df_by_zone.show(10)
 
 # %% [markdown]
@@ -82,10 +84,9 @@ df_time = (
         F.round(F.avg("trip_duration_min"), 1).alias("avg_duration_min"),
         F.round(F.avg("total_amount"), 2).alias("avg_fare"),
     )
-    .orderBy("pickup_day_of_week", "pickup_hour")
 )
 
 path = gold_table("time_patterns")
 df_time.write.format("delta").mode("overwrite").save(path)
-print(f"time_patterns written → {path}")
+log.info("time_patterns written → %s", path)
 df_time.show(24)

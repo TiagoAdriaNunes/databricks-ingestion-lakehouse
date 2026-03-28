@@ -7,12 +7,16 @@
 # Run after downloading data:
 # ```
 # uv run python scripts/download_tlc_data.py --year 2024 --months 1 2 3
-# uv run python notebooks/bronze/01_ingest_tlc_trips.py
+# uv run python notebooks/local/bronze/01_ingest_tlc_trips.py
 # ```
 
 # %%
+import logging
 import sys
 from pathlib import Path
+
+logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
+log = logging.getLogger(__name__)
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
@@ -32,9 +36,9 @@ if not raw_files:
         "Run: uv run python scripts/download_tlc_data.py --year 2024 --months 1"
     )
 
-print(f"Found {len(raw_files)} file(s):")
+log.info("Found %d file(s):", len(raw_files))
 for f in sorted(raw_files):
-    print(f"  {f.name}")
+    log.info("  %s", f.name)
 
 # %% [markdown]
 # ## Read raw Parquet files
@@ -46,7 +50,7 @@ df_raw = (
     .parquet(str(RAW_DIR))
 )
 
-print(f"Row count: {df_raw.count():,}")
+log.info("Row count: %s", f"{df_raw.count():,}")
 df_raw.printSchema()
 
 # %% [markdown]
@@ -61,7 +65,7 @@ df_bronze = df_raw.withColumns(
 )
 
 table_path = bronze_table("tlc_trips_raw")
-print(f"Writing Bronze table → {table_path}")
+log.info("Writing Bronze table → %s", table_path)
 
 (
     df_bronze.write.format("delta")
@@ -70,12 +74,12 @@ print(f"Writing Bronze table → {table_path}")
     .save(table_path)
 )
 
-print("Bronze write complete.")
+log.info("Bronze write complete.")
 
 # %% [markdown]
 # ## Quick validation
 
 # %%
 df_check = spark.read.format("delta").load(table_path)
-print(f"Bronze row count: {df_check.count():,}")
+log.info("Bronze row count: %s", f"{df_check.count():,}")
 df_check.show(5, truncate=False)

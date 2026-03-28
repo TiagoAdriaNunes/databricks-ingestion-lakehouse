@@ -1,19 +1,23 @@
 # %% [markdown]
 # # Bronze — Ingest TLC Trips via Databricks SQL
 #
-# Uploads are already on DBFS (run scripts/upload_to_dbfs.py first).
+# Uploads are already on the Unity Catalog Volume (run scripts/upload_to_volume.py first).
 # This notebook creates the Bronze Delta table and loads the Parquet files
-# using COPY INTO via the Databricks SQL Warehouse.
+# using INSERT INTO + read_files() via the Databricks SQL Warehouse.
 #
 # Run:
-#   uv run python notebooks/bronze/01_ingest_bronze_sql.py
+#   uv run python notebooks/databricks/bronze/01_ingest_bronze_sql.py
 
 # %%
+import logging
 import os
 import sys
 
 from databricks import sql
 from dotenv import load_dotenv
+
+logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
+log = logging.getLogger(__name__)
 
 load_dotenv()
 
@@ -31,35 +35,33 @@ connection = sql.connect(
     access_token=TOKEN,
 )
 cursor = connection.cursor()
-print(f"Connected to {HOST}")
+log.info("Connected to %s", HOST)
 
-# %% [markdown]
-# ## Discover available catalogs
+try:
+    # %% [markdown]
+    # ## Discover available catalogs
 
-# %%
-cursor.execute("SHOW CATALOGS")
-catalogs = [row[0] for row in cursor.fetchall()]
-print(f"Available catalogs: {catalogs}")
+    # %%
+    cursor.execute("SHOW CATALOGS")
+    catalogs = [row[0] for row in cursor.fetchall()]
+    log.info("Available catalogs: %s", catalogs)
 
-if CATALOG not in catalogs:
-    print(f"\nCatalog '{CATALOG}' not found.")
-    print(f"Update DATABRICKS_CATALOG in .env to one of: {catalogs}")
-    cursor.close()
-    connection.close()
-    sys.exit(1)
+    if CATALOG not in catalogs:
+        log.error("Catalog '%s' not found. Update DATABRICKS_CATALOG in .env to one of: %s", CATALOG, catalogs)
+        sys.exit(1)
 
-# %% [markdown]
-# ## Create schema (if not exists)
+    # %% [markdown]
+    # ## Create schema (if not exists)
 
-# %%
-cursor.execute(f"CREATE SCHEMA IF NOT EXISTS {CATALOG}.{SCHEMA}")
-print(f"Schema ready: {CATALOG}.{SCHEMA}")
+    # %%
+    cursor.execute(f"CREATE SCHEMA IF NOT EXISTS {CATALOG}.{SCHEMA}")
+    log.info("Schema ready: %s.%s", CATALOG, SCHEMA)
 
-# %% [markdown]
-# ## Create Bronze Delta table (if not exists)
+    # %% [markdown]
+    # ## Create Bronze Delta table
 
-# %%
-cursor.execute(f"""
+    # %%
+    cursor.execute(f"""
 CREATE OR REPLACE TABLE {CATALOG}.{SCHEMA}.tlc_trips_raw (
     VendorID              BIGINT,
     tpep_pickup_datetime  TIMESTAMP_NTZ,
@@ -86,28 +88,25 @@ CREATE OR REPLACE TABLE {CATALOG}.{SCHEMA}.tlc_trips_raw (
 USING DELTA
 TBLPROPERTIES ('delta.feature.timestampNtz' = 'supported')
 """)
-print(f"Table ready: {CATALOG}.{SCHEMA}.tlc_trips_raw")
+    log.info("Table ready: %s.%s.tlc_trips_raw", CATALOG, SCHEMA)
 
-# %% [markdown]
-# ## Create Volume (if not exists)
+    # %% [markdown]
+    # ## Create Volume (if not exists)
 
-# %%
-cursor.execute(f"CREATE VOLUME IF NOT EXISTS {CATALOG}.{SCHEMA}.{VOLUME}")
-print(f"Volume ready: {VOLUME_PATH}/")
+    # %%
+    cursor.execute(f"CREATE VOLUME IF NOT EXISTS {CATALOG}.{SCHEMA}.{VOLUME}")
+    log.info("Volume ready: %s/", VOLUME_PATH)
 
-# %% [markdown]
-# ## Load Parquet files with INSERT INTO + read_files()
-#
-# read_files() handles schema differences across years (e.g. 2019 vs 2024 types).
-# Truncate first so re-runs don't duplicate rows.
+    # %% [markdown]
+    # ## Load Parquet files with INSERT INTO + read_files()
+    #
+    # CREATE OR REPLACE TABLE above already creates an empty table, so no TRUNCATE needed.
+    # read_files() handles schema differences across years (e.g. 2019 vs 2024 types).
 
-# %%
-print(f"Truncating table before reload ...")
-cursor.execute(f"TRUNCATE TABLE {CATALOG}.{SCHEMA}.tlc_trips_raw")
+    # %%
+    log.info("Loading from %s/ ...", VOLUME_PATH)
 
-print(f"Loading from {VOLUME_PATH}/ ...")
-
-cursor.execute(f"""
+    cursor.execute(f"""
 INSERT INTO {CATALOG}.{SCHEMA}.tlc_trips_raw
 SELECT
     CAST(VendorID              AS BIGINT)        AS VendorID,
@@ -137,29 +136,30 @@ FROM read_files(
     mergeSchema => true
 )
 """)
+    log.info("Insert complete.")
 
-print("Insert complete.")
+    # %% [markdown]
+    # ## Quick validation
 
-# %% [markdown]
-# ## Quick validation
+    # %%
+    cursor.execute(f"SELECT COUNT(*) AS row_count FROM {CATALOG}.{SCHEMA}.tlc_trips_raw")
+    row = cursor.fetchone()
+    log.info("Bronze row count: %s", f"{row.row_count:,}")
 
-# %%
-cursor.execute(f"SELECT COUNT(*) AS row_count FROM {CATALOG}.{SCHEMA}.tlc_trips_raw")
-row = cursor.fetchone()
-print(f"\nBronze row count: {row.row_count:,}")
-
-cursor.execute(f"""
+    cursor.execute(f"""
 SELECT
     MIN(tpep_pickup_datetime) AS earliest_pickup,
     MAX(tpep_pickup_datetime) AS latest_pickup,
     COUNT(DISTINCT date_trunc('month', tpep_pickup_datetime)) AS months_loaded
 FROM {CATALOG}.{SCHEMA}.tlc_trips_raw
 """)
-row = cursor.fetchone()
-print(f"Earliest pickup : {row.earliest_pickup}")
-print(f"Latest pickup   : {row.latest_pickup}")
-print(f"Months loaded   : {row.months_loaded}")
+    row = cursor.fetchone()
+    log.info("Earliest pickup : %s", row.earliest_pickup)
+    log.info("Latest pickup   : %s", row.latest_pickup)
+    log.info("Months loaded   : %s", row.months_loaded)
 
-cursor.close()
-connection.close()
-print("\nDone.")
+finally:
+    cursor.close()
+    connection.close()
+
+log.info("Done.")
